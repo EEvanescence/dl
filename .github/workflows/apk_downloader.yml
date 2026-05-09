@@ -1,0 +1,53 @@
+name: APK Downloader
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_name:
+        description: 'Package name (e.g., org.telegram.messenger)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  download-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download apkeep
+        run: |
+          wget -q https://github.com/EFForg/apkeep/releases/download/v0.8.0/apkeep-x86_64-unknown-linux-musl -O apkeep
+          chmod +x apkeep
+
+      - name: Fetch APK
+        run: |
+          mkdir -p downloads
+          # Fetch from APKPure to avoid Google Play auth blocks
+          ./apkeep -a ${{ inputs.package_name }} -d apkpure downloads/
+
+      - name: Process and Split
+        run: |
+          cd downloads
+          APK_FILE=$(ls *.apk 2>/dev/null | head -n 1)
+          
+          if [ -z "$APK_FILE" ]; then
+            echo "Error: Download failed."
+            exit 1
+          fi
+
+          # Split into 95MB chunks for GitHub limits
+          7z a -mx=3 -v95m "${{ inputs.package_name }}.7z" "$APK_FILE"
+          rm "$APK_FILE"
+
+      - name: Commit and Push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add downloads/
+          git commit -m "Add ${{ inputs.package_name }}" || echo "No changes to commit"
+          git push
