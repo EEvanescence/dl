@@ -21,7 +21,8 @@ jobs:
 
       - name: Download apkeep
         run: |
-          wget -q https://github.com/EFForg/apkeep/releases/download/v0.8.0/apkeep-x86_64-unknown-linux-musl -O apkeep
+          # Fetch the latest stable release for Linux (GNU)
+          wget -q https://github.com/EFForg/apkeep/releases/latest/download/apkeep-x86_64-unknown-linux-gnu -O apkeep
           chmod +x apkeep
 
       - name: Fetch APK
