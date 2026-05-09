@@ -3,8 +3,8 @@ name: APK Downloader
 on:
   workflow_dispatch:
     inputs:
-      package_name:
-        description: 'Package name (e.g., org.telegram.messenger)'
+      app_input:
+        description: 'Package name OR Google Play URL'
         required: true
         type: string
 
@@ -18,6 +18,25 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /*
+            !/dl/
+            !/apks/
+
+
+      - name: Parse Input
+        env:
+          RAW_INPUT: ${{ inputs.app_input }}
+        run: |
+          if [[ "$RAW_INPUT" == *"id="* ]]; then
+            PKG=$(echo "$RAW_INPUT" | grep -oP 'id=\K[^&]+')
+          else
+            PKG="$RAW_INPUT"
+          fi
+          echo "pkg=$PKG" >> $GITHUB_ENV
 
       - name: Download apkeep
         run: |
@@ -26,8 +45,8 @@ jobs:
 
       - name: Fetch APK
         run: |
-          mkdir -p downloads
-          ./apkeep -a ${{ inputs.package_name }} -d apk-pure downloads/
+          mkdir -p temp_dl
+          ./apkeep -a ${{ env.pkg }} -d apk-pure temp_dl/
 
       - name: Process and Split
         run: |
@@ -40,15 +59,16 @@ jobs:
           fi
 
           mkdir -p ../apks
-          7z a -mx=3 -v85m "../apks/${{ inputs.package_name }}.7z" "$DOWNLOADED_FILE"
+          7z a -mx=3 -v85m "../apks/${{ env.pkg }}.7z" "$DOWNLOADED_FILE"
           
           cd ..
           rm -rf temp_dl
 
       - name: Commit and Push
         run: |
-          git config user.name "NET-Sentinel Bot"
-          git config user.email "224584266+NetSentinel-Bot@users.noreply.github.com"
-          git add apks/
-          git commit -m "Add ${{ inputs.package_name }}" || echo "No changes to commit"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add --sparse apks/
+          git commit -m "Add ${{ env.pkg }}" || echo "No changes to commit"
           git push
+
