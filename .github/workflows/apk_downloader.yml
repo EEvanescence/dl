@@ -21,7 +21,6 @@ jobs:
 
       - name: Download apkeep
         run: |
-          # Fetch the latest stable release for Linux (GNU)
           wget -q https://github.com/EFForg/apkeep/releases/latest/download/apkeep-x86_64-unknown-linux-gnu -O apkeep
           chmod +x apkeep
 
@@ -32,7 +31,7 @@ jobs:
 
       - name: Process and Split
         run: |
-          cd downloads
+          cd temp_dl
           DOWNLOADED_FILE=$(ls -1A | head -n 1)
           
           if [ -z "$DOWNLOADED_FILE" ]; then
@@ -40,14 +39,16 @@ jobs:
             exit 1
           fi
 
-          7z a -mx=3 -v85m "${{ inputs.package_name }}.7z" "$DOWNLOADED_FILE"
-          rm "$DOWNLOADED_FILE"
-
+          mkdir -p ../apks
+          7z a -mx=3 -v85m "../apks/${{ inputs.package_name }}.7z" "$DOWNLOADED_FILE"
+          
+          cd ..
+          rm -rf temp_dl
 
       - name: Commit and Push
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add downloads/
+          git config user.name "NET-Sentinel Bot"
+          git config user.email "224584266+NetSentinel-Bot@users.noreply.github.com"
+          git add apks/
           git commit -m "Add ${{ inputs.package_name }}" || echo "No changes to commit"
           git push
