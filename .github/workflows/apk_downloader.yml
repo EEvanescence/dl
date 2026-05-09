@@ -28,8 +28,7 @@ jobs:
       - name: Fetch APK
         run: |
           mkdir -p downloads
-          # Fetch from APKPure to avoid Google Play auth blocks
-          ./apkeep -a ${{ inputs.package_name }} -d apkpure downloads/
+          ./apkeep -a ${{ inputs.package_name }} -d apk-pure downloads/
 
       - name: Process and Split
         run: |
