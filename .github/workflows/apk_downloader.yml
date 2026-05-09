@@ -1,4 +1,4 @@
-name: دانلود فایل از گوگل پلی
+name: Google Play dl
 
 on:
   workflow_dispatch:
