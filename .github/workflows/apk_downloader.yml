@@ -48,7 +48,7 @@ jobs:
           mkdir -p temp_dl
           ./apkeep -a ${{ env.pkg }} -d apk-pure temp_dl/
 
-      - name: Process and Split
+      - name: Process File
         run: |
           cd temp_dl
           DOWNLOADED_FILE=$(ls -1A | head -n 1)
@@ -59,10 +59,11 @@ jobs:
           fi
 
           mkdir -p ../apks
-          7z a -mx=3 -v85m "../apks/${{ env.pkg }}.7z" "$DOWNLOADED_FILE"
+          mv "$DOWNLOADED_FILE" "../apks/"
           
           cd ..
           rm -rf temp_dl
+
 
       - name: Commit and Push
         run: |
