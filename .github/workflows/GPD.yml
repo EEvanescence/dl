@@ -47,6 +47,7 @@ jobs:
       - name: Setup Cloudflare WARP Proxy (Anti-Ban Tunnel 🛡️)
         run: |
           curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          # مشکل خط زیر بود که فاصله اضافه شد: deb[arch=amd64...
           echo "deb[arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
           sudo apt-get update -qq
           sudo apt-get install -y cloudflare-warp
@@ -68,7 +69,7 @@ jobs:
       - name: Stealth Fetcher via Private API (Python)
         run: |
           cat << 'EOF' > stealth_fetcher.py
-          import sys, os, json, base64, time, zipfile
+          import sys, os, json, base64, time, zipfile, shutil
           from urllib.parse import urlparse, parse_qs
           from curl_cffi import requests
           from bs4 import BeautifulSoup
@@ -78,14 +79,14 @@ jobs:
           out_dir = "temp_dl"
           os.makedirs(out_dir, exist_ok=True)
 
-          # Obfuscated Endpoints (Your Telegram Bot API)
+          # Obfuscated Endpoints
           EP_TOKEN = base64.b64decode(b'aHR0cHM6Ly90b2tlbi5taTkuY29tLw==').decode()
           EP_GET = base64.b64decode(b'aHR0cHM6Ly9hcGkubWk5LmNvbS9nZXQ=').decode()
           ORIGIN = base64.b64decode(b'aHR0cHM6Ly9hcGtkb3dubG9hZGVyLnBhZ2VzLmRldg==').decode()
 
           headers = {"Content-Type": "application/json", "Origin": ORIGIN, "Referer": ORIGIN + "/"}
           
-          # Routing traffic exclusively through our Cloudflare WARP proxy
+          # Proxy traffic through our Cloudflare WARP
           proxies = {
               "http": "socks5h://127.0.0.1:40000",
               "https": "socks5h://127.0.0.1:40000"
@@ -138,7 +139,7 @@ jobs:
               print(f"[+] Found {len(links)} parts specifically for {arch}. Downloading...")
               dl_files =[]
               for i, link in enumerate(links):
-                  fname = parse_qs(urlparse(link).query).get('filename',[f'part_{i}.apk'])[0]
+                  fname = parse_qs(urlparse(link).query).get('filename', [f'part_{i}.apk'])[0]
                   fpath = os.path.join(out_dir, fname)
                   r = session.get(link, stream=True, timeout=120)
                   with open(fpath, 'wb') as f:
@@ -229,7 +230,7 @@ jobs:
           echo "---" >> current_run.md
           echo "" >> current_run.md
           
-          if[ -f Links.md ]; then
+          if [ -f Links.md ]; then
             tail -n +4 Links.md > old_links.md 2>/dev/null || touch old_links.md
             echo -e "$HEADER" > Links.md
             cat current_run.md old_links.md >> Links.md
