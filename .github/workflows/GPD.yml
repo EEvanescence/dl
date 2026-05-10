@@ -1,12 +1,20 @@
-name: 0x01 PlayStore dl
+name: GPD
 
 on:
   workflow_dispatch:
     inputs:
       app_input:
-        description: 'Package name OR Google Play URL'
+        description: 'Package name OR Google Play URL (e.g., com.spotify.music)'
         required: true
         type: string
+      architecture:
+        description: 'Target Architecture'
+        required: true
+        type: choice
+        options:
+          - 'arm64-v8a'
+          - 'armeabi-v7a'
+          - 'universal'
 
 jobs:
   download-apk:
@@ -24,7 +32,7 @@ jobs:
             /*
             !/dl/
 
-      - name: Parse Input (Get Package Name)
+      - name: Parse Input
         id: parse
         run: |
           RAW_INPUT="${{ github.event.inputs.app_input }}"
@@ -34,63 +42,130 @@ jobs:
             PKG="$RAW_INPUT"
           fi
           echo "pkg=$PKG" >> $GITHUB_ENV
-          echo "📥 Target Package: $PKG"
+          echo "arch=${{ github.event.inputs.architecture }}" >> $GITHUB_ENV
+          echo "📥 Target Package: $PKG | Arch: ${{ github.event.inputs.architecture }}"
 
-      - name: Download apkeep (Google Play Fetcher Engine)
-        run: |
-          wget -q https://github.com/EFForg/apkeep/releases/latest/download/apkeep-x86_64-unknown-linux-gnu -O apkeep
-          chmod +x apkeep
+      - name: Install Dependencies
+        run: pip3 install curl_cffi beautifulsoup4 --break-system-packages
 
-      - name: Fetch APK via Engine
+      - name: Smart Downloader & Architecture Filter (Python)
         run: |
-          mkdir -p temp_dl
-          # Using apk-pure backend as it doesn't block GitHub IPs and provides original signatures
-          ./apkeep -a ${{ env.pkg }} -d apk-pure temp_dl/
-
-      - name: Smart Repackager (Python)
-        # This script transforms annoying .xapk files into clean, standard .apk or .apks formats!
-        run: |
-          cat << 'EOF' > repackager.py
+          cat << 'EOF' > fetch_and_repack.py
           import os, sys, zipfile, shutil
-          
+          from curl_cffi import requests
+          from bs4 import BeautifulSoup
+
           pkg = sys.argv[1]
-          work_dir = "temp_dl"
-          out_dir = "processed_dl"
+          target_arch = sys.argv[2]
+          out_dir = "temp_dl"
           os.makedirs(out_dir, exist_ok=True)
+
+          session = requests.Session(impersonate="chrome110")
+
+          # 1. Fetch the FULL bundle from APKCombo (Bypassing Cloudflare with curl_cffi)
+          def download_apkcombo():
+              print(f"[*] Trying to fetch full bundle from APKCombo for {pkg}...")
+              try:
+                  res = session.get(f"https://apkcombo.com/a/{pkg}/download/apk", timeout=30)
+                  soup = BeautifulSoup(res.text, 'html.parser')
+                  links = soup.select('.list-downloads li a')
+                  for a in links:
+                      href = a.get('href')
+                      if href and 'download' in href:
+                          fname = href.split('/')[-1].split('?')[0]
+                          if not fname.endswith('.apk') and not fname.endswith('.xapk'):
+                              fname = f"{pkg}.apk"
+                          filepath = os.path.join(out_dir, fname)
+                          
+                          print(f"[+] Found Direct Link! Downloading to {fname}...")
+                          r = session.get(href, stream=True, timeout=120)
+                          r.raise_for_status()
+                          with open(filepath, 'wb') as f:
+                              for chunk in r.iter_content(8192):
+                                  if chunk: f.write(chunk)
+                          return filepath
+              except Exception as e:
+                  print(f"[-] APKCombo failed: {e}")
+              return None
+
+          dl_file = download_apkcombo()
           
-          files = os.listdir(work_dir)
-          if not files:
-              print("[-] Error: No files were downloaded!")
+          if not dl_file:
+              print("[-] Download failed. Make sure the package name is correct.")
               sys.exit(1)
-              
-          dl_file = os.path.join(work_dir, files[0])
-          
+
+          # 2. Repackage and Filter Architectures
+          processed_dir = "processed_dl"
+          os.makedirs(processed_dir, exist_ok=True)
+
           if dl_file.endswith(".apk"):
-              print("[+] Standard APK detected. Renaming...")
-              final_path = os.path.join(out_dir, f"{pkg}.apk")
+              print("[+] Standard APK detected. It contains all libs internally. Moving to output...")
+              final_path = os.path.join(processed_dir, f"{pkg}_{target_arch}.apk")
               shutil.move(dl_file, final_path)
               print(f"✅ Saved as {final_path}")
-              
-          elif dl_file.endswith(".xapk") or dl_file.endswith(".apkm"):
-              print("[+] Bundled file (.xapk/.apkm) detected. Converting to standard .apks...")
-              final_path = os.path.join(out_dir, f"{pkg}.apks")
-              
-              with zipfile.ZipFile(dl_file, 'r') as z_in:
-                  with zipfile.ZipFile(final_path, 'w', zipfile.ZIP_DEFLATED) as z_out:
-                      for item in z_in.namelist():
-                          # We only want the actual .apk files, ignoring manifests and icons
-                          if item.endswith(".apk"):
-                              file_name = item.split('/')[-1]
-                              z_out.writestr(file_name, z_in.read(item))
-                              print(f"  -> Extracted: {file_name}")
-                              
-              print(f"✅ Successfully repacked into standard format: {final_path}")
-          else:
-              print(f"[-] Unknown file format: {dl_file}")
-              sys.exit(1)
+
+          elif dl_file.endswith(".xapk") or dl_file.endswith(".apks") or dl_file.endswith(".apkm"):
+              print(f"[+] Bundle detected! Extracting and filtering specifically for {target_arch}...")
+              extract_dir = "temp_extracted"
+              with zipfile.ZipFile(dl_file, 'r') as z:
+                  z.extractall(extract_dir)
+
+              # Find all actual APKs inside the bundle
+              apk_files =[]
+              for root, dirs, files in os.walk(extract_dir):
+                  for f in files:
+                      if f.endswith('.apk'):
+                          apk_files.append(os.path.join(root, f))
+
+              # Architecture Keywords Mapping
+              arch_map = {
+                  'arm64-v8a': ['arm64', 'aarch64', 'v8a'],
+                  'armeabi-v7a': ['armeabi', 'armv7', 'v7a']
+              }
+              wanted_keywords = arch_map.get(target_arch, [])
+
+              final_apks =[]
+              staging_dir = "staging_apks"
+              os.makedirs(staging_dir, exist_ok=True)
+
+              for apk_path in apk_files:
+                  f_name = os.path.basename(apk_path)
+                  shutil.move(apk_path, os.path.join(staging_dir, f_name))
+                  
+                  # Always keep base APK, standard splits (dpi, language, features)
+                  if 'config.' not in f_name and 'split_' not in f_name:
+                      final_apks.append(f_name)
+                      continue
+                      
+                  if any(k in f_name for k in['hdpi', 'xxhdpi', 'mdpi', 'ldpi', 'en', 'fr', 'es', 'de', 'it', 'ru']):
+                      final_apks.append(f_name)
+                      continue
+                      
+                  # Check if this split is an architecture file
+                  is_arch_split = any(arch in f_name.lower() for arch in['arm64', 'armeabi', 'armv7', 'x86', 'aarch64'])
+                  
+                  if is_arch_split:
+                      if target_arch == 'universal':
+                          final_apks.append(f_name)
+                          print(f"  -> Keeping arch split (Universal mode): {f_name}")
+                      elif any(w in f_name.lower() for w in wanted_keywords):
+                          final_apks.append(f_name)
+                          print(f"  -> 🎯 Keeping requested arch split: {f_name}")
+                      else:
+                          print(f"  -> ✂️ Discarding unwanted arch split: {f_name}")
+                  else:
+                      final_apks.append(f_name)
+
+              # Re-pack the filtered APKs into a clean .apks file
+              final_apks_path = os.path.join(processed_dir, f"{pkg}_{target_arch}.apks")
+              with zipfile.ZipFile(final_apks_path, 'w', zipfile.ZIP_DEFLATED) as z_out:
+                  for f in final_apks:
+                      z_out.write(os.path.join(staging_dir, f), arcname=f)
+
+              print(f"✅ Successfully repacked and filtered: {final_apks_path}")
           EOF
-          
-          python3 repackager.py "${{ env.pkg }}"
+
+          python3 fetch_and_repack.py "${{ env.pkg }}" "${{ env.arch }}"
 
       - name: Zip & Split (Bypass 100MB GitHub Limit)
         shell: bash
@@ -104,7 +179,7 @@ jobs:
             
             rm -f "dl/${BASENAME}.zip"*
             
-            if [ "$SIZE" -gt "$LIMIT" ]; then
+            if[ "$SIZE" -gt "$LIMIT" ]; then
               echo "📦 File exceeds 95MB. Splitting: $BASENAME"
               if ! command -v 7z &> /dev/null; then
                 sudo apt-get update -qq && sudo apt-get install -y p7zip-full > /dev/null
@@ -119,13 +194,13 @@ jobs:
               echo "$BASENAME" >> new_files.txt
             fi
           done
-          rm -rf temp_dl processed_dl apkeep repackager.py
+          rm -rf temp_dl processed_dl fetch_and_repack.py temp_extracted staging_apks
 
       - name: Update Links.md
         shell: bash
         run: |
           [ ! -f new_files.txt ] && exit 0
-        
+          
           REPO="${{ github.repository }}"
           BRANCH="${GITHUB_REF_NAME}"
           HEADER="## 🔗 Direct Download Links\n> Click on any link below to start downloading directly.<br><br/>\n\n"
@@ -169,5 +244,5 @@ jobs:
           git config user.name "NET-Sentinel Bot"
           git config user.email "224584266+NetSentinel-Bot@users.noreply.github.com"
           git add --sparse dl/ Links.md
-          git commit -m "Added ${{ env.pkg }} [skip ci]" || echo "Nothing to commit"
+          git commit -m "Added ${{ env.pkg }} (${{ env.arch }}) [skip ci]" || echo "Nothing to commit"
           git push origin HEAD:${GITHUB_REF_NAME}
