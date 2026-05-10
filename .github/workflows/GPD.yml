@@ -1,4 +1,4 @@
-name: 0x01 PlayStore dl (WARP Tunnel)
+name: GPD (WARP Tunnel)
 
 on:
   workflow_dispatch:
@@ -44,11 +44,10 @@ jobs:
           echo "arch=${{ github.event.inputs.architecture }}" >> $GITHUB_ENV
           echo "📥 Target Package: $PKG | Arch: ${{ github.event.inputs.architecture }}"
 
-      - name: Setup Cloudflare WARP Proxy (Anti-Ban Tunnel 🛡️)
+      - name: Setup Cloudflare WARP Proxy
         run: |
           curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-          # ops
-          echo "deb[arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
           sudo apt-get update -qq
           sudo apt-get install -y cloudflare-warp
           
@@ -62,11 +61,12 @@ jobs:
           sleep 5
           
           echo "✅ WARP Tunnel established successfully!"
+          
 
       - name: Install Dependencies
         run: pip3 install curl_cffi beautifulsoup4 --break-system-packages
 
-      - name: Stealth Fetcher via Private API (Python)
+      - name: Stealth Fetcher (Python)
         run: |
           cat << 'EOF' > stealth_fetcher.py
           import sys, os, json, base64, time, zipfile, shutil
