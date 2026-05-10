@@ -1,10 +1,10 @@
-name: GPD
+name: 0x01 PlayStore dl (WARP Tunnel)
 
 on:
   workflow_dispatch:
     inputs:
       app_input:
-        description: 'Package name (e.g., ai.x.grok, io.nekohasekai.sfa)'
+        description: 'Package name (e.g., ai.x.grok)'
         required: true
         type: string
       architecture:
@@ -14,7 +14,6 @@ on:
         options:
           - 'arm64-v8a'
           - 'armeabi-v7a'
-          - 'universal'
 
 jobs:
   download-apk:
@@ -45,193 +44,129 @@ jobs:
           echo "arch=${{ github.event.inputs.architecture }}" >> $GITHUB_ENV
           echo "📥 Target Package: $PKG | Arch: ${{ github.event.inputs.architecture }}"
 
+      - name: Setup Cloudflare WARP Proxy (Anti-Ban Tunnel 🛡️)
+        run: |
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb[arch=amd64 signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          sudo apt-get update -qq
+          sudo apt-get install -y cloudflare-warp
+          
+          sudo systemctl start warp-svc
+          sleep 2
+          
+          warp-cli --accept-tos registration new
+          warp-cli --accept-tos mode proxy
+          warp-cli --accept-tos proxy port 40000
+          warp-cli --accept-tos connect
+          sleep 5
+          
+          echo "✅ WARP Tunnel established successfully!"
+
       - name: Install Dependencies
         run: pip3 install curl_cffi beautifulsoup4 --break-system-packages
 
-      - name: Smart Fetcher & Arch Filter Engine (Python)
+      - name: Stealth Fetcher via Private API (Python)
         run: |
-          cat << 'EOF' > fetch_and_repack.py
-          import os, sys, zipfile, shutil
-          from urllib.parse import urlparse
+          cat << 'EOF' > stealth_fetcher.py
+          import sys, os, json, base64, time, zipfile
+          from urllib.parse import urlparse, parse_qs
           from curl_cffi import requests
           from bs4 import BeautifulSoup
 
           pkg = sys.argv[1]
-          target_arch = sys.argv[2]
+          arch = sys.argv[2]
           out_dir = "temp_dl"
           os.makedirs(out_dir, exist_ok=True)
 
-          session = requests.Session(impersonate="chrome110")
-          session.headers.update({"Accept-Language": "en-US,en;q=0.9"})
+          # Obfuscated Endpoints (Your Telegram Bot API)
+          EP_TOKEN = base64.b64decode(b'aHR0cHM6Ly90b2tlbi5taTkuY29tLw==').decode()
+          EP_GET = base64.b64decode(b'aHR0cHM6Ly9hcGkubWk5LmNvbS9nZXQ=').decode()
+          ORIGIN = base64.b64decode(b'aHR0cHM6Ly9hcGtkb3dubG9hZGVyLnBhZ2VzLmRldg==').decode()
 
-          def download_apkcombo():
-              print(f"[*] Method 1: Searching APKCombo for {pkg}...")
-              try:
-                  # Step 1: Search the app
-                  res = session.get(f"https://apkcombo.com/search?q={pkg}", timeout=30)
-                  if res.status_code != 200:
-                      print(f"[-] APKCombo search failed (HTTP {res.status_code})")
-                      return None
+          headers = {"Content-Type": "application/json", "Origin": ORIGIN, "Referer": ORIGIN + "/"}
+          
+          # Routing traffic exclusively through our Cloudflare WARP proxy
+          proxies = {
+              "http": "socks5h://127.0.0.1:40000",
+              "https": "socks5h://127.0.0.1:40000"
+          }
+          
+          session = requests.Session(impersonate="chrome110", proxies=proxies)
 
-                  soup = BeautifulSoup(res.text, 'html.parser')
-                  app_link = None
-                  
-                  # Find the app URL from search results
-                  for a in soup.select('a.l_item'):
-                      href = a.get('href', '')
-                      if pkg in href:
-                          app_link = href
-                          break
-                  
-                  if not app_link:
-                      if pkg in res.url:
-                          app_link = urlparse(res.url).path
-                      else:
-                          print("[-] App not found in APKCombo search results.")
-                          return None
+          print(f"[*] Connecting to Stealth API for {pkg} ({arch})...")
+          try:
+              # 1. Fetch Token
+              payload = {"package": pkg, "device": "phone", "arch": arch, "vc": "", "device_id": "", "sdk": "default"}
+              res = session.post(EP_TOKEN, headers=headers, json=payload, timeout=45)
+              if not res.json().get("success"):
+                  print("[-] Failed to fetch token.")
+                  sys.exit(1)
+              
+              token = res.json()["token"]
+              ts = res.json()["timestamp"]
+              print("[+] Authorization Token generated via WARP.")
 
-                  # Step 2: Go to download page
-                  dl_page_url = f"https://apkcombo.com{app_link.rstrip('/')}/download/apk"
-                  print(f"[*] Found app page. Fetching download page...")
-                  res2 = session.get(dl_page_url, timeout=30)
-                  
-                  soup2 = BeautifulSoup(res2.text, 'html.parser')
-                  links = soup2.select('ul.list-downloads li a')
-                  
-                  if not links:
-                      print("[-] No download links found on APKCombo download page.")
-                      return None
-                      
-                  # Get the direct download URL
-                  href = links[0].get('href')
-                  if href:
-                      if href.startswith('/'): href = f"https://apkcombo.com{href}"
-                      
-                      fname = href.split('/')[-1].split('?')[0]
-                      if not fname.endswith(('.apk', '.xapk', '.apks')):
-                          fname = f"{pkg}.xapk" # assume bundle
-                      
-                      filepath = os.path.join(out_dir, fname)
-                      print(f"[+] Downloading file from APKCombo...")
-                      r = session.get(href, timeout=120)
-                      r.raise_for_status()
-                      with open(filepath, 'wb') as f:
-                          f.write(r.content)
-                      return filepath
-              except Exception as e:
-                  print(f"[-] APKCombo error: {e}")
-              return None
+              # 2. Wait for Build (SSE stream)
+              data_payload = {"hl": "en", "package": pkg, "device": "phone", "arch": arch, "vc": "", "device_id": "", "sdk": "default", "timestamp": ts}
+              enc_data = base64.b64encode(json.dumps(data_payload).encode()).decode()
+              url2 = f"{EP_GET}?token={requests.utils.quote(token)}&data={requests.utils.quote(enc_data)}"
+              
+              print("[*] Generating pure architecture download links...")
+              res2 = session.get(url2, headers={'Accept': 'text/event-stream', 'Referer': headers["Referer"]}, timeout=120)
+              
+              final_html = None
+              for line in res2.text.strip().split('\n'):
+                  if line.startswith('data:'):
+                      try:
+                          d = json.loads(line[5:].strip())
+                          if d.get("progress", 0) >= 100 and d.get("html"):
+                              final_html = d["html"]
+                              break
+                      except: continue
+              
+              if not final_html:
+                  print("[-] Failed to get final HTML.")
+                  sys.exit(1)
 
-          def download_apkpure():
-              print(f"[*] Method 2: Trying APKPure Direct XAPK/APK Fallback...")
-              urls =[
-                  f"https://d.apkpure.com/b/XAPK/{pkg}?version=latest",
-                  f"https://d.apkpure.com/b/APK/{pkg}?version=latest"
-              ]
-              for url in urls:
-                  try:
-                      r = session.get(url, timeout=60, allow_redirects=True)
-                      if r.status_code == 200:
-                          ct = r.headers.get('Content-Type', '')
-                          if 'text/html' in ct: continue 
-                          
-                          cd = r.headers.get('Content-Disposition', '')
-                          fname = f"{pkg}.apk"
-                          if 'filename=' in cd:
-                              fname = cd.split('filename=')[-1].strip('"\'')
-                          elif url.endswith('XAPK') or 'xapk' in ct.lower() or 'xapk' in cd.lower():
-                              fname = f"{pkg}.xapk"
-                              
-                          filepath = os.path.join(out_dir, fname)
-                          print(f"[+] Downloading from APKPure...")
-                          with open(filepath, 'wb') as f:
-                              f.write(r.content)
-                          return filepath
-                  except Exception as e:
-                      print(f"[-] APKPure fetch error: {e}")
-              return None
+              soup = BeautifulSoup(final_html, 'html.parser')
+              links =[a.get('href') for a in soup.select('.apk_files_item a') if a.get('href')]
+              
+              if not links:
+                  print("[-] App not found or architecture unavailable!")
+                  sys.exit(1)
 
-          # Try APKCombo first, if fails try APKPure
-          dl_file = download_apkcombo()
-          if not dl_file:
-              print("[!] APKCombo failed. Engaging APKPure fallback...")
-              dl_file = download_apkpure()
+              print(f"[+] Found {len(links)} parts specifically for {arch}. Downloading...")
+              dl_files =[]
+              for i, link in enumerate(links):
+                  fname = parse_qs(urlparse(link).query).get('filename',[f'part_{i}.apk'])[0]
+                  fpath = os.path.join(out_dir, fname)
+                  r = session.get(link, stream=True, timeout=120)
+                  with open(fpath, 'wb') as f:
+                      for chunk in r.iter_content(chunk_size=8192):
+                          if chunk: f.write(chunk)
+                  dl_files.append(fpath)
 
-          if not dl_file:
-              print("[-] All download engines failed. Target might not exist.")
+              # 3. Create output package
+              processed_dir = "processed_dl"
+              os.makedirs(processed_dir, exist_ok=True)
+              
+              if len(dl_files) > 1:
+                  apks_path = os.path.join(processed_dir, f"{pkg}_{arch}.apks")
+                  with zipfile.ZipFile(apks_path, 'w') as zf:
+                      for f in dl_files:
+                          zf.write(f, os.path.basename(f))
+                  print(f"[+] Successfully bundled: {apks_path}")
+              elif len(dl_files) == 1:
+                  apk_path = os.path.join(processed_dir, f"{pkg}_{arch}.apk")
+                  shutil.move(dl_files[0], apk_path)
+                  print(f"[+] Successfully saved single APK: {apk_path}")
+
+          except Exception as e:
+              print(f"[-] Critical Error: {e}")
               sys.exit(1)
-
-          print(f"[+] Original file successfully downloaded: {dl_file}")
-
-          # Repackage and Filter Architectures
-          processed_dir = "processed_dl"
-          os.makedirs(processed_dir, exist_ok=True)
-
-          if dl_file.endswith(".apk"):
-              print("[+] Standalone APK detected. Moving to output...")
-              final_path = os.path.join(processed_dir, f"{pkg}_{target_arch}.apk")
-              shutil.move(dl_file, final_path)
-              print(f"✅ Final Ready: {final_path}")
-
-          elif dl_file.endswith(".xapk") or dl_file.endswith(".apks") or dl_file.endswith(".apkm"):
-              print(f"[+] Bundle detected! Extracting and filtering specifically for {target_arch}...")
-              extract_dir = "temp_extracted"
-              with zipfile.ZipFile(dl_file, 'r') as z:
-                  z.extractall(extract_dir)
-
-              apk_files =[]
-              for root, dirs, files in os.walk(extract_dir):
-                  for f in files:
-                      if f.endswith('.apk'):
-                          apk_files.append(os.path.join(root, f))
-
-              arch_map = {
-                  'arm64-v8a': ['arm64', 'aarch64', 'v8a'],
-                  'armeabi-v7a': ['armeabi', 'armv7', 'v7a']
-              }
-              wanted_keywords = arch_map.get(target_arch, [])
-
-              final_apks =[]
-              staging_dir = "staging_apks"
-              os.makedirs(staging_dir, exist_ok=True)
-
-              for apk_path in apk_files:
-                  f_name = os.path.basename(apk_path)
-                  shutil.move(apk_path, os.path.join(staging_dir, f_name))
-                  
-                  # Always keep base APK and standard config splits
-                  if 'config.' not in f_name and 'split_' not in f_name:
-                      final_apks.append(f_name)
-                      continue
-                      
-                  if any(k in f_name.lower() for k in['hdpi', 'xxhdpi', 'mdpi', 'ldpi', 'en', 'fr', 'es', 'de', 'it', 'ru']):
-                      final_apks.append(f_name)
-                      continue
-                      
-                  # Check if this split is an architecture file
-                  is_arch_split = any(arch in f_name.lower() for arch in['arm64', 'armeabi', 'armv7', 'x86', 'aarch64'])
-                  
-                  if is_arch_split:
-                      if target_arch == 'universal':
-                          final_apks.append(f_name)
-                          print(f"  -> Keeping arch split (Universal mode): {f_name}")
-                      elif any(w in f_name.lower() for w in wanted_keywords):
-                          final_apks.append(f_name)
-                          print(f"  -> 🎯 Keeping requested arch split: {f_name}")
-                      else:
-                          print(f"  -> ✂️ Discarding unwanted arch split: {f_name}")
-                  else:
-                      final_apks.append(f_name)
-
-              final_apks_path = os.path.join(processed_dir, f"{pkg}_{target_arch}.apks")
-              with zipfile.ZipFile(final_apks_path, 'w', zipfile.ZIP_DEFLATED) as z_out:
-                  for f in final_apks:
-                      z_out.write(os.path.join(staging_dir, f), arcname=f)
-
-              print(f"✅ Filtered and repacked into: {final_apks_path}")
           EOF
 
-          python3 fetch_and_repack.py "${{ env.pkg }}" "${{ env.arch }}"
+          python3 stealth_fetcher.py "${{ env.pkg }}" "${{ env.arch }}"
 
       - name: Zip & Split (Bypass 100MB GitHub Limit)
         shell: bash
@@ -260,7 +195,7 @@ jobs:
               echo "$BASENAME" >> new_files.txt
             fi
           done
-          rm -rf temp_dl processed_dl fetch_and_repack.py temp_extracted staging_apks
+          rm -rf temp_dl processed_dl stealth_fetcher.py
 
       - name: Update Links.md
         shell: bash
@@ -287,7 +222,7 @@ jobs:
               *)               ICON="📥" ;;
             esac
             
-            echo "- $ICON[\`$FNAME\`]($RAW_URL) - **$SIZE_STR**" >> current_run.md
+            echo "- $ICON [\`$FNAME\`]($RAW_URL) - **$SIZE_STR**" >> current_run.md
             echo "" >> current_run.md
           done < new_files.txt
           
