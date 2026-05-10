@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       app_input:
-        description: 'Package name OR Google Play URL (e.g., com.spotify.music)'
+        description: 'Package name (e.g., ai.x.grok, io.nekohasekai.sfa)'
         required: true
         type: string
       architecture:
@@ -48,10 +48,11 @@ jobs:
       - name: Install Dependencies
         run: pip3 install curl_cffi beautifulsoup4 --break-system-packages
 
-      - name: Smart Downloader & Architecture Filter (Python)
+      - name: Smart Fetcher & Arch Filter Engine (Python)
         run: |
           cat << 'EOF' > fetch_and_repack.py
           import os, sys, zipfile, shutil
+          from urllib.parse import urlparse
           from curl_cffi import requests
           from bs4 import BeautifulSoup
 
@@ -61,48 +62,116 @@ jobs:
           os.makedirs(out_dir, exist_ok=True)
 
           session = requests.Session(impersonate="chrome110")
+          session.headers.update({"Accept-Language": "en-US,en;q=0.9"})
 
-          # 1. Fetch the FULL bundle from APKCombo (Bypassing Cloudflare with curl_cffi)
           def download_apkcombo():
-              print(f"[*] Trying to fetch full bundle from APKCombo for {pkg}...")
+              print(f"[*] Method 1: Searching APKCombo for {pkg}...")
               try:
-                  res = session.get(f"https://apkcombo.com/a/{pkg}/download/apk", timeout=30)
+                  # Step 1: Search the app
+                  res = session.get(f"https://apkcombo.com/search?q={pkg}", timeout=30)
+                  if res.status_code != 200:
+                      print(f"[-] APKCombo search failed (HTTP {res.status_code})")
+                      return None
+
                   soup = BeautifulSoup(res.text, 'html.parser')
-                  links = soup.select('.list-downloads li a')
-                  for a in links:
-                      href = a.get('href')
-                      if href and 'download' in href:
-                          fname = href.split('/')[-1].split('?')[0]
-                          if not fname.endswith('.apk') and not fname.endswith('.xapk'):
-                              fname = f"{pkg}.apk"
-                          filepath = os.path.join(out_dir, fname)
-                          
-                          print(f"[+] Found Direct Link! Downloading to {fname}...")
-                          r = session.get(href, stream=True, timeout=120)
-                          r.raise_for_status()
-                          with open(filepath, 'wb') as f:
-                              for chunk in r.iter_content(8192):
-                                  if chunk: f.write(chunk)
-                          return filepath
+                  app_link = None
+                  
+                  # Find the app URL from search results
+                  for a in soup.select('a.l_item'):
+                      href = a.get('href', '')
+                      if pkg in href:
+                          app_link = href
+                          break
+                  
+                  if not app_link:
+                      if pkg in res.url:
+                          app_link = urlparse(res.url).path
+                      else:
+                          print("[-] App not found in APKCombo search results.")
+                          return None
+
+                  # Step 2: Go to download page
+                  dl_page_url = f"https://apkcombo.com{app_link.rstrip('/')}/download/apk"
+                  print(f"[*] Found app page. Fetching download page...")
+                  res2 = session.get(dl_page_url, timeout=30)
+                  
+                  soup2 = BeautifulSoup(res2.text, 'html.parser')
+                  links = soup2.select('ul.list-downloads li a')
+                  
+                  if not links:
+                      print("[-] No download links found on APKCombo download page.")
+                      return None
+                      
+                  # Get the direct download URL
+                  href = links[0].get('href')
+                  if href:
+                      if href.startswith('/'): href = f"https://apkcombo.com{href}"
+                      
+                      fname = href.split('/')[-1].split('?')[0]
+                      if not fname.endswith(('.apk', '.xapk', '.apks')):
+                          fname = f"{pkg}.xapk" # assume bundle
+                      
+                      filepath = os.path.join(out_dir, fname)
+                      print(f"[+] Downloading file from APKCombo...")
+                      r = session.get(href, timeout=120)
+                      r.raise_for_status()
+                      with open(filepath, 'wb') as f:
+                          f.write(r.content)
+                      return filepath
               except Exception as e:
-                  print(f"[-] APKCombo failed: {e}")
+                  print(f"[-] APKCombo error: {e}")
               return None
 
+          def download_apkpure():
+              print(f"[*] Method 2: Trying APKPure Direct XAPK/APK Fallback...")
+              urls =[
+                  f"https://d.apkpure.com/b/XAPK/{pkg}?version=latest",
+                  f"https://d.apkpure.com/b/APK/{pkg}?version=latest"
+              ]
+              for url in urls:
+                  try:
+                      r = session.get(url, timeout=60, allow_redirects=True)
+                      if r.status_code == 200:
+                          ct = r.headers.get('Content-Type', '')
+                          if 'text/html' in ct: continue 
+                          
+                          cd = r.headers.get('Content-Disposition', '')
+                          fname = f"{pkg}.apk"
+                          if 'filename=' in cd:
+                              fname = cd.split('filename=')[-1].strip('"\'')
+                          elif url.endswith('XAPK') or 'xapk' in ct.lower() or 'xapk' in cd.lower():
+                              fname = f"{pkg}.xapk"
+                              
+                          filepath = os.path.join(out_dir, fname)
+                          print(f"[+] Downloading from APKPure...")
+                          with open(filepath, 'wb') as f:
+                              f.write(r.content)
+                          return filepath
+                  except Exception as e:
+                      print(f"[-] APKPure fetch error: {e}")
+              return None
+
+          # Try APKCombo first, if fails try APKPure
           dl_file = download_apkcombo()
-          
           if not dl_file:
-              print("[-] Download failed. Make sure the package name is correct.")
+              print("[!] APKCombo failed. Engaging APKPure fallback...")
+              dl_file = download_apkpure()
+
+          if not dl_file:
+              print("[-] All download engines failed. Target might not exist.")
               sys.exit(1)
 
-          # 2. Repackage and Filter Architectures
+          print(f"[+] Original file successfully downloaded: {dl_file}")
+
+          # Repackage and Filter Architectures
           processed_dir = "processed_dl"
           os.makedirs(processed_dir, exist_ok=True)
 
           if dl_file.endswith(".apk"):
-              print("[+] Standard APK detected. It contains all libs internally. Moving to output...")
+              print("[+] Standalone APK detected. Moving to output...")
               final_path = os.path.join(processed_dir, f"{pkg}_{target_arch}.apk")
               shutil.move(dl_file, final_path)
-              print(f"✅ Saved as {final_path}")
+              print(f"✅ Final Ready: {final_path}")
 
           elif dl_file.endswith(".xapk") or dl_file.endswith(".apks") or dl_file.endswith(".apkm"):
               print(f"[+] Bundle detected! Extracting and filtering specifically for {target_arch}...")
@@ -110,14 +179,12 @@ jobs:
               with zipfile.ZipFile(dl_file, 'r') as z:
                   z.extractall(extract_dir)
 
-              # Find all actual APKs inside the bundle
               apk_files =[]
               for root, dirs, files in os.walk(extract_dir):
                   for f in files:
                       if f.endswith('.apk'):
                           apk_files.append(os.path.join(root, f))
 
-              # Architecture Keywords Mapping
               arch_map = {
                   'arm64-v8a': ['arm64', 'aarch64', 'v8a'],
                   'armeabi-v7a': ['armeabi', 'armv7', 'v7a']
@@ -132,12 +199,12 @@ jobs:
                   f_name = os.path.basename(apk_path)
                   shutil.move(apk_path, os.path.join(staging_dir, f_name))
                   
-                  # Always keep base APK, standard splits (dpi, language, features)
+                  # Always keep base APK and standard config splits
                   if 'config.' not in f_name and 'split_' not in f_name:
                       final_apks.append(f_name)
                       continue
                       
-                  if any(k in f_name for k in['hdpi', 'xxhdpi', 'mdpi', 'ldpi', 'en', 'fr', 'es', 'de', 'it', 'ru']):
+                  if any(k in f_name.lower() for k in['hdpi', 'xxhdpi', 'mdpi', 'ldpi', 'en', 'fr', 'es', 'de', 'it', 'ru']):
                       final_apks.append(f_name)
                       continue
                       
@@ -156,13 +223,12 @@ jobs:
                   else:
                       final_apks.append(f_name)
 
-              # Re-pack the filtered APKs into a clean .apks file
               final_apks_path = os.path.join(processed_dir, f"{pkg}_{target_arch}.apks")
               with zipfile.ZipFile(final_apks_path, 'w', zipfile.ZIP_DEFLATED) as z_out:
                   for f in final_apks:
                       z_out.write(os.path.join(staging_dir, f), arcname=f)
 
-              print(f"✅ Successfully repacked and filtered: {final_apks_path}")
+              print(f"✅ Filtered and repacked into: {final_apks_path}")
           EOF
 
           python3 fetch_and_repack.py "${{ env.pkg }}" "${{ env.arch }}"
@@ -179,7 +245,7 @@ jobs:
             
             rm -f "dl/${BASENAME}.zip"*
             
-            if[ "$SIZE" -gt "$LIMIT" ]; then
+            if [ "$SIZE" -gt "$LIMIT" ]; then
               echo "📦 File exceeds 95MB. Splitting: $BASENAME"
               if ! command -v 7z &> /dev/null; then
                 sudo apt-get update -qq && sudo apt-get install -y p7zip-full > /dev/null
@@ -221,14 +287,14 @@ jobs:
               *)               ICON="📥" ;;
             esac
             
-            echo "- $ICON [\`$FNAME\`]($RAW_URL) - **$SIZE_STR**" >> current_run.md
+            echo "- $ICON[\`$FNAME\`]($RAW_URL) - **$SIZE_STR**" >> current_run.md
             echo "" >> current_run.md
           done < new_files.txt
           
           echo "---" >> current_run.md
           echo "" >> current_run.md
           
-          if [ -f Links.md ]; then
+          if[ -f Links.md ]; then
             tail -n +4 Links.md > old_links.md 2>/dev/null || touch old_links.md
             echo -e "$HEADER" > Links.md
             cat current_run.md old_links.md >> Links.md
